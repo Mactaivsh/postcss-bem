@@ -1,191 +1,174 @@
-var postcss = require('postcss');
-var config = {
-    suit: {
-        separators: {
-            namespace: '-',
-            descendent: '-',
-            modifier: '--',
-            state: '.is-'
-        }
-    },
-    bem: {
-        separators: {
-            namespace: '--',
-            descendent: '__',
-            modifier: '_'
-        }
+const postcss = require("postcss")
+const defaultConfig = {
+  separators: {
+    namespace: "-",
+    descendent: "-",
+    modifier: "--",
+    state: ".is-"
+  }
+}
+
+const proccessAtComponent = (component, ns) => {
+  let name = component.params
+  let last = component
+  let parent = component.parent
+
+  if (ns) {
+    name = `${ns}${defaultConfig.separators.namespace}${name}`
+  }
+
+  let newComponent = postcss.rule({
+    selector: `.${name}`,
+    source: component.source
+  })
+
+  component.each(rule => {
+    let separator
+    let newRule
+
+    if (rule.type === 'atrule') {
+      if (rule.name === 'modifier') {
+        separator = defaultConfig.separators.modifier
+      } else if (rule.name === 'descendent') {
+        separator = defaultConfig.separators.descendent
+      }
+
+      if (separator) {
+        newRule = postcss.rule({
+          selector: `.${name}${separator}${rule.params}`,
+          source: rule.source
+        })
+
+        rule.each(node => {
+          newRule.append(node)
+        })
+        component.parent.insertAfter(last, newRule)
+        last = newRule
+        rule.remove()
+      }
+
+    } else if (rule.type === 'decl') {
+      newComponent.append(rule)
     }
-};
+  })
+  parent.insertBefore(component, newComponent)
+  parent.removeChild(component)
+}
 
-module.exports = postcss.plugin('postcss-bem', function (opts) {
-    opts = opts || {};
 
-    if (!opts.style) {
-        opts.style = 'suit';
-    }
+module.exports = postcss.plugin("postcss-suit", function(opts) {
+  opts = opts || {}
 
-    if (opts.style !== 'suit' && opts.style !== 'bem') {
-        throw new Error('postcss-bem: opts.style may only be "suit" or "bem"');
-    }
+  let currentConfig = Object.assign(defaultConfig, opts)
 
-    var currentConfig = config[opts.style];
+  return function(root, result) {
+    let namespaces = {}
 
-    function processComponent (component, namespace) {
-        var name = component.params;
+    root.walkAtRules('utility', rule => {
+      if (!rule.params) {
+        throw rule.error("No names supplied to @utility")
+      }
 
-        if (namespace) {
-            name = namespace + currentConfig.separators.namespace + name;
-        }
+      let utilityNames = postcss.list.comma(rule.params)
 
-        var last = component;
-        var newComponent = postcss.rule({
-            selector: '.' + name,
-            source: component.source
-        });
-        component.each(function (rule) {
-            var separator;
-            var newRule;
+      let selector = utilityNames
+        .map(params => {
+          let name
+          params = params.split(':')
+          name = "u-"
 
-            if (rule.type === 'atrule') {
-                if (rule.name === 'modifier') {
-                    separator = currentConfig.separators.modifier;
-                } else if (rule.name === 'descendent') {
-                    separator = currentConfig.separators.descendent;
-                }
-
-                if(separator) {
-                    newRule = postcss.rule({
-                        selector: '.' + name + separator + rule.params,
-                        source: rule.source
-                    });
-                    rule.each(function (node) {
-                        node.moveTo(newRule);
-                    });
-                    component.parent.insertAfter(last, newRule);
-                    last = newRule;
-                    rule.removeSelf();
-                }
+          if (params.length === 2) {
+            let variant = params[1]
+            if (variant === "small") {
+              name += "sm-"
+            } else if (variant === "medium") {
+              name += "md-"
+            } else if (variant === "large") {
+              name += "lg-"
+            } else {
+              result.warn("Unknown variant: " + variant, {
+                node: rule
+              });
             }
-            if (!separator) {
-                rule.moveTo(newComponent);
-            }
-        });
+          }
+          name += params[0]
+          return "." + name
+        }).join(", ")
 
-        component.replaceWith(newComponent);
-    }
+      let newUtility = postcss.rule({
+        selector,
+        source: rule.source
+      })
 
-    return function (css, result) {
-        var namespaces = {};
+      rule.each(function(node) {
+        newUtility.append(node.clone())
+      })
 
-        if (opts.style === 'suit') {
-            css.eachAtRule('utility', function (utility) {
-                if (!utility.params) {
-                    throw utility.error('No names supplied to @utility');
-                }
+      root.insertBefore(rule, newUtility)
+      root.removeChild(rule)
+    })
 
-                var utilityNames = postcss.list.comma(utility.params);
+    root.walkAtRules("component-namespace", ns => {
+      let name = ns.params
+      let parent = ns.parent
 
-                var selector = utilityNames.map(function (params) {
-                    params = postcss.list.space(params);
-                    var variant;
-                    var name;
+      if (ns.nodes.length === 0) {
+        return void ns.remove()
+      }
 
-                    if (params.length > 2) {
-                        result.warn('Too many parameters for @utility', {
-                            node: utility
-                        });
-                    }
+      ns.walkAtRules("component", component => {
+        proccessAtComponent(component, name)
+      })
 
-                    name = 'u-';
-                    if (params.length > 1) {
-                        variant = params[1];
+      ns.each(node => {
+        parent.insertBefore(ns, node)
+      })
 
-                        if (variant === 'small') {
-                            name += 'sm';
-                        } else if (variant === 'medium') {
-                            name += 'md';
-                        } else if (variant === 'large') {
-                            name += 'lg';
-                        } else {
-                            result.warn('Unknown variant: ' + variant, {
-                                node: utility
-                            });
-                        }
-                        name += '-';
-                    }
-                    name += params[0];
-                    return '.' + name;
-                }).join(', ');
+      ns.remove()
+    })
 
-                var newUtility = postcss.rule({
-                    selector: selector,
-                    source: utility.source
-                });
+    root.walkAtRules("component", function(component) {
+      var namespace = opts.defaultNamespace;
+      var id = component.source.input.file || component.source.input.id;
+      if (id in namespaces) {
+        namespace = namespaces[id];
+      }
 
-                utility.each(function (node) {
-                    node.moveTo(newUtility);
-                });
-                utility.replaceWith(newUtility);
-            });
-        }
+      processComponent(component, namespace);
+    });
 
-        css.eachAtRule('component-namespace', function (namespace) {
-            var name = namespace.params;
+    root.walkAtRules("when", function(when) {
+      var parent = when.parent;
 
-            if (!namespace.nodes) {
-                namespaces[namespace.source.input.file || namespace.source.input.id] = name;
-                namespace.removeSelf();
-                return;
-            }
+      if (parent === root || parent.type !== "rule") {
+        throw when.error(
+          "@when can only be used in rules which are not the root node"
+        );
+      }
 
-            namespace.eachAtRule('component', function (component) {
-                processComponent(component, name);
-            });
+      var states = when.params;
+      var newSelector = postcss.list
+        .comma(parent.selector)
+        .map(function(selector) {
+          return postcss.list
+            .comma(states)
+            .map(function(state) {
+              return selector + currentConfig.separators.state + state;
+            })
+            .join(", ");
+        })
+        .join(", ");
 
-            var node = namespace.last;
-            while (node) {
-                node.moveAfter(namespace);
-                node = namespace.last;
-            }
-            namespace.removeSelf();
-        });
+      var newWhen = postcss.rule({
+        selector: newSelector,
+        source: when.source
+      });
 
-        css.eachAtRule('component', function (component) {
-            var namespace = opts.defaultNamespace;
-            var id = component.source.input.file || component.source.input.id;
-            if (id in namespaces) {
-                namespace = namespaces[id];
-            }
-
-            processComponent(component, namespace);
-        });
-
-        if (opts.style === 'suit') {
-            css.eachAtRule('when', function (when) {
-                var parent = when.parent;
-
-                if (parent === css || parent.type !== 'rule') {
-                    throw when.error('@when can only be used in rules which are not the root node');
-                }
-
-                var states = when.params;
-                var newSelector = postcss.list.comma(parent.selector).map(function (selector) {
-                    return postcss.list.comma(states).map(function (state) {
-                        return selector + currentConfig.separators.state + state;
-                    }).join(', ');
-                }).join(', ');
-
-                var newWhen = postcss.rule({
-                    selector: newSelector,
-                    source: when.source
-                });
-
-                when.each(function (node) {
-                    node.moveTo(newWhen);
-                });
-                newWhen.moveAfter(parent);
-                when.removeSelf();
-            });
-        }
-    };
+      when.each(function(node) {
+        node.moveTo(newWhen);
+      });
+      newWhen.moveAfter(parent);
+      when.removeSelf();
+    });
+  };
 });
