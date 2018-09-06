@@ -1,114 +1,170 @@
-const postcss = require("postcss")
+const postcss = require('postcss')
 const defaultConfig = {
   separators: {
-    namespace: "-",
-    descendent: "-",
-    modifier: "--",
-    state: ".is-"
-  }
+    namespace: '-',
+    descendent: '-',
+    modifier: '--',
+    state: '.is-'
+  },
+  defaultNamespace: undefined
 }
 
-const proccessAtComponent = (component, ns) => {
-  let name = component.params
+const proccessAtComponent = (component, ns, config) => {
+  let selector = component.params
   let last = component
   let parent = component.parent
 
   if (ns) {
-    name = `${ns}${defaultConfig.separators.namespace}${name}`
+    selector = `.${ns}${config.separators.namespace}${selector}`
+  } else {
+    selector = `.${selector}`
   }
 
   let newComponent = postcss.rule({
-    selector: `.${name}`,
-    source: component.source
+    selector,
+    source: component.source,
+    raws: { ...component.raws, semicolon: true }
   })
 
   component.each(rule => {
     let separator
-    let newRule
 
-    if (rule.type === 'atrule') {
-      if (rule.name === 'modifier') {
-        separator = defaultConfig.separators.modifier
-      } else if (rule.name === 'descendent') {
-        separator = defaultConfig.separators.descendent
-      }
-
-      if (separator) {
-        newRule = postcss.rule({
-          selector: `.${name}${separator}${rule.params}`,
-          source: rule.source
-        })
-
-        rule.each(node => {
-          newRule.append(node)
-        })
-        component.parent.insertAfter(last, newRule)
-        last = newRule
-        rule.remove()
-      }
-
-    } else if (rule.type === 'decl') {
+    if (rule.type === 'decl') {
       newComponent.append(rule)
+    } else if (rule.type === 'atrule') {
+      if (rule.name === 'modifier') {
+        separator = config.separators.modifier
+        processAtModifier(component, rule, selector, separator, config)
+      } else if (rule.name === 'descendent') {
+        separator = config.separators.descendent
+        processDescendent(component, rule, selector, separator, config)
+      } else if (rule.name === 'when') {
+        separator = config.separators.state
+        processAtWhen(component, rule, selector, separator, config)
+      }
     }
   })
+
+  component.each(rule => {
+    component.parent.insertAfter(last, rule)
+    last = rule
+  })
+
   parent.insertBefore(component, newComponent)
   parent.removeChild(component)
 }
 
+const processAtModifier = (component, modifier, parentSelector, separator, config) => {
+  let selector = `${parentSelector}${separator}${modifier.params}`
+  let newModifier = postcss.rule({
+    selector,
+    source: modifier.source,
+    raws: modifier.raws
+  })
 
-module.exports = postcss.plugin("postcss-suit", function(opts) {
+  modifier.each(rule => {
+    if (rule.type === 'decl') {
+      newModifier.append(rule)
+    } else if (rule.type === 'atrule' && rule.name === 'when') {
+      processAtWhen(component, rule, selector, config.separators.state)
+    }
+  })
+
+  component.append(newModifier)
+  modifier.remove()
+}
+
+const processDescendent = (component, descendent, parentSelector, separator, config) => {
+  let selector = `${parentSelector}${separator}${descendent.params}`
+  let newDescendent = postcss.rule({
+    selector,
+    source: descendent.source,
+    raws: descendent.raws
+  })
+
+  descendent.each(rule => {
+    if (rule.type === 'decl') {
+      newDescendent.append(rule)
+    } else if (rule.type === 'atrule') {
+      if (rule.name === 'when') {
+        processAtWhen(component, rule, selector, config.separators.state)
+      } else if (rule.name === 'modifier') {
+        processAtModifier(component, rule, selector, config.separators.modifier)
+      }
+    }
+  })
+
+  component.append(newDescendent)
+  descendent.remove()
+}
+
+const processAtWhen = (component, when, parentSelector, separator) => {
+  let selector = `${parentSelector}${separator}${when.params}`
+  let newWhen = postcss.rule({
+    selector,
+    source: when.source,
+    raws: when.raws
+  })
+
+  newWhen.append(when.nodes)
+  component.append(newWhen)
+  when.remove()
+}
+
+module.exports = postcss.plugin('postcss-suit', function (opts) {
   opts = opts || {}
-
-  let currentConfig = Object.assign(defaultConfig, opts)
-
-  return function(root, result) {
-    let namespaces = {}
-
-    root.walkAtRules('utility', rule => {
-      if (!rule.params) {
-        throw rule.error("No names supplied to @utility")
+  const currentConfig = Object.assign({}, defaultConfig, opts)
+  return (root, result) => {
+    root.walkAtRules('utility', utility => {
+      let parent = utility.parent
+      if (!utility.params) {
+        throw utility.error('No names supplied to @utility')
       }
 
-      let utilityNames = postcss.list.comma(rule.params)
+      let utilityNames = postcss.list.comma(utility.params)
 
       let selector = utilityNames
         .map(params => {
           let name
-          params = params.split(':')
-          name = "u-"
+          params = [params.split(' ')[0]]
+          if (/.:(small|medium|large)$/.test(params)) {
+            params = params.join('').split(':')
+          }
+          name = 'u-'
 
           if (params.length === 2) {
             let variant = params[1]
-            if (variant === "small") {
-              name += "sm-"
-            } else if (variant === "medium") {
-              name += "md-"
-            } else if (variant === "large") {
-              name += "lg-"
+            if (variant === 'small') {
+              name += 'sm-'
+            } else if (variant === 'medium') {
+              name += 'md-'
+            } else if (variant === 'large') {
+              name += 'lg-'
             } else {
-              result.warn("Unknown variant: " + variant, {
-                node: rule
-              });
+              result.warn('Unknown variant: ' + variant, {
+                node: utility
+              })
             }
           }
           name += params[0]
-          return "." + name
-        }).join(", ")
+          return '.' + name
+        }).join(', ')
 
       let newUtility = postcss.rule({
         selector,
-        source: rule.source
+        source: utility.source,
+        raws: utility.raws
       })
 
-      rule.each(function(node) {
+      utility.each(node => {
         newUtility.append(node.clone())
       })
 
-      root.insertBefore(rule, newUtility)
-      root.removeChild(rule)
+      parent.insertBefore(utility, newUtility)
+      parent.removeChild(utility)
     })
 
-    root.walkAtRules("component-namespace", ns => {
+    root.walkAtRules('component-namespace', ns => {
       let name = ns.params
       let parent = ns.parent
 
@@ -116,8 +172,8 @@ module.exports = postcss.plugin("postcss-suit", function(opts) {
         return void ns.remove()
       }
 
-      ns.walkAtRules("component", component => {
-        proccessAtComponent(component, name)
+      ns.walkAtRules('component', component => {
+        proccessAtComponent(component, name, currentConfig)
       })
 
       ns.each(node => {
@@ -127,48 +183,9 @@ module.exports = postcss.plugin("postcss-suit", function(opts) {
       ns.remove()
     })
 
-    root.walkAtRules("component", function(component) {
-      var namespace = opts.defaultNamespace;
-      var id = component.source.input.file || component.source.input.id;
-      if (id in namespaces) {
-        namespace = namespaces[id];
-      }
-
-      processComponent(component, namespace);
-    });
-
-    root.walkAtRules("when", function(when) {
-      var parent = when.parent;
-
-      if (parent === root || parent.type !== "rule") {
-        throw when.error(
-          "@when can only be used in rules which are not the root node"
-        );
-      }
-
-      var states = when.params;
-      var newSelector = postcss.list
-        .comma(parent.selector)
-        .map(function(selector) {
-          return postcss.list
-            .comma(states)
-            .map(function(state) {
-              return selector + currentConfig.separators.state + state;
-            })
-            .join(", ");
-        })
-        .join(", ");
-
-      var newWhen = postcss.rule({
-        selector: newSelector,
-        source: when.source
-      });
-
-      when.each(function(node) {
-        node.moveTo(newWhen);
-      });
-      newWhen.moveAfter(parent);
-      when.removeSelf();
-    });
-  };
-});
+    root.walkAtRules('component', component => {
+      let namespace = currentConfig.defaultNamespace
+      proccessAtComponent(component, namespace, currentConfig)
+    })
+  }
+})
